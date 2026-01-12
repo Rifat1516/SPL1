@@ -11,7 +11,6 @@
 #include<unistd.h>
 #include"PacketHeader.h"
 
-/* macOS Compatibility Macros */
 #ifdef __APPLE__
 #define saddr ip_src.s_addr
 #define daddr ip_dst.s_addr
