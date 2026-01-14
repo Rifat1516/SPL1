@@ -1,123 +1,188 @@
-#include<stdio.h>   
-#include<stdlib.h>  
-#include<string.h>      
-#include<netinet/ip.h>  
-#include<netinet/tcp.h>
-#include<netinet/udp.h>
-#include<netinet/ip_icmp.h>
-#include<sys/socket.h>
-#include<arpa/inet.h>
-#include<sys/types.h>
-#include<unistd.h>
-#include"PacketHeader.h"
-
-#ifdef __APPLE__
-#define saddr ip_src.s_addr
-#define daddr ip_dst.s_addr
-#define protocol ip_p
-#define tot_len ip_len
-#define ihl ip_hl
-#define version ip_v
-#define type icmp_type
-#define code icmp_code
-#endif
-
-void IPheader(unsigned char*,int);
-void tcpPacket(unsigned char*,int);
-void udpPacket(unsigned char*,int);
-void icmpPacket(unsigned char*,int);
-void Hexdata(unsigned char*,int);
-int sslPacket(unsigned char*,int);
-void CapturingPacket(unsigned char*,int);
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <pcap.h>
+#include <netinet/ip.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include "PacketHeader.h"
 
 extern int ICMP_num, UDP_num, TCP_num, others, total;
-extern struct sockaddr_in source_addr, dest_addr;
 extern FILE *fp;
 
-int Realtimepacket(int x){
-    struct sockaddr saddr_raw;
-    socklen_t sockaddSize;
-    int dataSize;
-    unsigned char *buff = (unsigned char *)malloc(65536);
-    int rawSocket;
+void tcpPacket(const u_char* buff, int dataSize);
+void udpPacket(const u_char* buff, int dataSize);
+void icmpPacket(const u_char* buff, int dataSize);
 
-    fp=fopen("PacketInfo.txt","w+");
-    
-    switch(x) {
-        case 1: rawSocket = socket(AF_INET, SOCK_RAW, IPPROTO_TCP); break;
-        case 2: rawSocket = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP); break;
-        case 3: rawSocket = socket(AF_INET, SOCK_RAW, IPPROTO_UDP); break;
-        default: return -6;
+
+int verify_log_system() {
+    fp = fopen("PacketInfo.txt", "a");
+    if (fp == NULL) {
+        return 0;
     }
-
-    if(rawSocket < 0) {
-        printf("Socket Error. Run with sudo.\n");
-        return -2;
-    }
-
-    printf("!!!!!!!!! Starting Capture !!!!!!!!!!!\n");
-
-    while(1){
-        sockaddSize = sizeof(struct sockaddr);
-        dataSize = recvfrom(rawSocket, buff, 65536, 0, &saddr_raw, &sockaddSize);
-        if(dataSize < 0) break;
-        CapturingPacket(buff, dataSize);
-        usleep(10000); 
-    }
-    close(rawSocket);
-    return 0;
+    return 1;
 }
 
-void CapturingPacket(unsigned char* buff, int dataSize){
-    struct ip *ip = (struct ip*)buff;
+const char* get_protocol_string(unsigned char proto_id) {
+    switch (proto_id) {
+        case IPPROTO_TCP:  return "TCP (Transmission Control)";
+        case IPPROTO_UDP:  return "UDP (User Datagram)";
+        case IPPROTO_ICMP: return "ICMP (Internet Control)";
+        default:           return "Other/Unknown";
+    }
+}
+
+
+void log_timestamp() {
+    time_t now;
+    time(&now);
+    fprintf(fp, "\n[Timestamp: %s]", ctime(&now));
+}
+
+void print_ui_line() {
+    printf("----------------------------------------------------------------------\n");
+}
+
+void clear_terminal() {
+    printf("\033[H\033[J");
+}
+
+
+void show_startup_banner(const char* device) {
+    clear_terminal();
+    printf("######################################################################\n");
+    printf("#                                                                    #\n");
+    printf("#                    PACKET ANALYZER ENGINE                          #\n");
+    printf("#              Midterm Project: Protocol Decoding                    #\n");
+    printf("#                                                                    #\n");
+    printf("######################################################################\n");
+    printf("  Listening on: %s\n", device);
+    printf("  Packet Size : 65536 bytes (Max)\n");
+    printf("  Promiscuous : Enabled\n");
+    printf("  Logging     : Active (PacketInfo.txt)\n");
+    printf("######################################################################\n\n");
+}
+
+void show_table_header() {
+    printf("%-8s %-18s %-18s %-10s %-8s\n", 
+           "ID", "Source Address", "Dest Address", "Protocol", "Length");
+    print_ui_line();
+}
+
+void show_shutdown_summary() {
+    print_ui_line();
+    printf("                NETWORK CAPTURE FINAL REPORT                  \n");
+    print_ui_line();
+    printf("  [+] Total Packets Processed : %-5d\n", total);
+    printf("  [+] TCP Stream Count        : %-5d\n", TCP_num);
+    printf("  [+] UDP Datagram Count      : %-5d\n", UDP_num);
+    printf("  [+] ICMP Message Count      : %-5d\n", ICMP_num);
+    printf("  [+] Miscellaneous Traffic   : %-5d\n", others);
+    print_ui_line();
+    printf("Status: Log file successfully synchronized.\n\n");
+}
+
+
+struct ip* decapsulate_to_layer3(const u_char* raw_packet) {
+    return (struct ip *)(raw_packet + 14);
+}
+
+
+void route_packet_by_protocol(struct ip* ip_hdr, int filter, const u_char* packet, int size) {
+    unsigned char protocol_type = ip_hdr->ip_p;
+
+    if (protocol_type == IPPROTO_TCP) {
+        TCP_num++;
+        if (filter == 1) {
+            tcpPacket((const u_char*)ip_hdr, size);
+        }
+    } 
+    else if (protocol_type == IPPROTO_UDP) {
+        UDP_num++;
+        if (filter == 3) {
+            udpPacket((const u_char*)ip_hdr, size);
+        }
+    } 
+    else if (protocol_type == IPPROTO_ICMP) {
+        ICMP_num++;
+        if (filter == 2) {
+            icmpPacket((const u_char*)ip_hdr, size);
+        }
+    } 
+    else {
+        others++;
+    }
+}
+
+void CapturingPacket(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
+    int filter_choice = *(int *)args;
+    int data_len = header->len;
+
+    // Layer 3 Decapsulation
+    struct ip *ip = decapsulate_to_layer3(packet);
     total++;
-    switch (ip->protocol) {
-        case 1:  ICMP_num++; icmpPacket(buff, dataSize); break;
-        case 6:  TCP_num++; tcpPacket(buff, dataSize); break;
-        case 17: UDP_num++; udpPacket(buff, dataSize); break;
-        default: others++; break;
+
+    // Logging Meta-data
+    log_timestamp();
+    fprintf(fp, "Packet ID: %d | Size: %d bytes | Proto: %s\n", 
+            total, data_len, get_protocol_string(ip->ip_p));
+
+    // Displaying brief info in Terminal table
+    printf("%-8d %-18s %-18s %-10s %-8d\n", 
+           total, inet_ntoa(ip->ip_src), inet_ntoa(ip->ip_dst), 
+           (ip->ip_p == 6) ? "TCP" : (ip->ip_p == 17) ? "UDP" : "ICMP", data_len);
+
+    // Deep Analysis
+    route_packet_by_protocol(ip, filter_choice, packet, data_len);
+}
+
+
+pcap_t* open_network_interface(const char* device_name, char* err_buffer) {
+    pcap_t* handle;
+    
+    handle = pcap_open_live(device_name, 65536, 1, 1000, err_buffer);
+    
+    if (handle == NULL) {
+        fprintf(stderr, "[ERROR] Interface Initialization Failed.\n");
+        return NULL;
     }
+    
+    return handle;
 }
 
-void IPheader(unsigned char* buff, int dataSize) {
-    struct ip *ip = (struct ip *)buff;
-    source_addr.sin_addr.s_addr = ip->saddr;
-    dest_addr.sin_addr.s_addr = ip->daddr;
+int Realtimepacket(int x) {
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t *handle;
+    char *target_dev = "en0"; // macOS WiFi Interface
 
-    fprintf(fp, "\nIP Header\n");
-    fprintf(fp, "     Source IP         : %s\n", inet_ntoa(source_addr.sin_addr));
-    fprintf(fp, "     Destination IP    : %s\n", inet_ntoa(dest_addr.sin_addr));
-    fprintf(fp, "     IP Version        : %d\n", ip->version);
-    fprintf(fp, "     Protocol          : %d\n", ip->protocol);
-    fprintf(fp, "     IP Total Length   : %d Bytes\n", ntohs(ip->tot_len));
-    fprintf(fp, "     IP Header Length  : %d Bytes\n", ip->ihl * 4);
-}
+    // Phase 1: Verify Hardware and Software access
+    if (!verify_log_system()) {
+        printf("[FATAL] Log system failed to initialize.\n");
+        return -1;
+    }
 
-void tcpPacket(unsigned char* buff, int dataSize) {
-    struct ip *ip = (struct ip *)buff;
-    unsigned short iphdrlen = ip->ihl * 4;
-    struct tcphdr *tcp = (struct tcphdr*)(buff + iphdrlen);
+    // Phase 2: Open Interface
+    handle = open_network_interface(target_dev, errbuf);
+    if (handle == NULL) {
+        printf("[FATAL] %s\n", errbuf);
+        fclose(fp);
+        return 2;
+    }
 
-    IPheader(buff, dataSize);
-    printf("%-20d%-20s%-20s%-20s%-20d%-20d\n", total, inet_ntoa(source_addr.sin_addr), 
-           inet_ntoa(dest_addr.sin_addr), "TCP", ntohs(tcp->th_sport), ntohs(tcp->th_dport));
-}
+    // Phase 3: Setup UI
+    show_startup_banner(target_dev);
+    show_table_header();
 
-void udpPacket(unsigned char *buff, int dataSize) {
-    struct ip *ip = (struct ip *)buff;
-    unsigned short iphdrlen = ip->ihl * 4;
-    struct udphdr *udp = (struct udphdr*)(buff + iphdrlen);
+    // Phase 4: Main Execution Loop
+    /* * Second parameter '0' means loop forever until interrupted. 
+     */
+    pcap_loop(handle, 0, CapturingPacket, (u_char *)&x);
 
-    IPheader(buff, dataSize);
-    printf("%-20d%-20s%-20s%-20s%-20d%-20d\n", total, inet_ntoa(source_addr.sin_addr), 
-           inet_ntoa(dest_addr.sin_addr), "UDP", ntohs(udp->uh_sport), ntohs(udp->uh_dport));
-}
+    // Phase 5: Cleanup and Finalize
+    pcap_close(handle);
+    show_shutdown_summary();
+    fclose(fp);
 
-void icmpPacket(unsigned char* buff, int dataSize) {
-    struct ip *ip = (struct ip *)buff;
-    unsigned short iphdrlen = ip->ihl * 4;
-    struct icmp *icmp = (struct icmp *)(buff + iphdrlen);
-
-    IPheader(buff, dataSize);
-    printf("%-20d%-15s%-20d%-20d\n", total, "ICMP", icmp->type, icmp->code);
+    return 0;
 }
