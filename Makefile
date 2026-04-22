@@ -1,15 +1,33 @@
-CC = gcc
-CFLAGS = -Wall -I.
-LIBS = -lpcap
-TARGET = PackAnalyzer
+CC=gcc
+STRIP=strip
+CFLAGS=-Wall
+LDFLAGS=-lpcap
 
+all: PackAnalyzer
 
-SRCS = argdump.c Realtimepacket.c analyzer.c
+argdump.o: argdump.c hexdump.h icmpRead.h arpRead.h
+	$(CC) -c $(CFLAGS) argdump.c
 
-all: $(TARGET)
+hexdump.o: hexdump.c hexdump.h
+	$(CC) -c $(CFLAGS) hexdump.c
+	     
+icmpRead.o: icmpRead.c icmpRead.h
+	$(CC) -c $(CFLAGS) icmpRead.c
+	     
+arpRead.o: arpRead.c arpRead.h
+	$(CC) -c $(CFLAGS) arpRead.c
 
-$(TARGET): $(SRCS)
-	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LIBS)
+Realtimepacket.o: Realtimepacket.c Realtimepacket.h
+	$(CC) -c $(CFLAGS) Realtimepacket.c
+
+SynFlood.o: SynFlood.c SynFlood.h
+	$(CC) -c $(CFLAGS) SynFlood.c
+	
+dumpingfunc.o: dumpingfunc.c dumpingfunc.h
+	$(CC) -c $(CFLAGS) dumpingfunc.c
+
+PackAnalyzer: argdump.o hexdump.o icmpRead.o arpRead.o Realtimepacket.o SynFlood.o dumpingfunc.o
+	$(CC) -o PackAnalyzer argdump.o hexdump.o icmpRead.o arpRead.o Realtimepacket.o SynFlood.o dumpingfunc.o $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET) PacketInfo.txt
+	rm -rf PackAnalyzer *.o PacketInfo.txt
