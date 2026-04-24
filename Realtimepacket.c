@@ -1,80 +1,109 @@
+#include "SynFlood.h"
+#include "PacketHeader.h"
+#include<pcap.h>
 #include<stdio.h>
 #include<stdlib.h>
 #include<string.h>
-#include<pcap.h>
 #include<arpa/inet.h>
-#include<sys/types.h>
-#include<unistd.h>
 #include<time.h>
-#include<ctype.h>
-#include"PacketHeader.h"
-#include"Realtimepacket.h"
 
 int total=0;
+extern void GetHexDumpGUI(const u_char *packet,bpf_u_int32 length,char *hexDump);
 
-void GetHexDumpGUI(const void *data,size_t size,char *output)
+#define MAX_STATES 10000
+#define ALPHABET_SIZE 256
+
+int trie[MAX_STATES][ALPHABET_SIZE];
+int fail[MAX_STATES];
+char* threat_match[MAX_STATES];
+int states_count = 1;
+
+void init_aho_corasick()
 {
-    unsigned char *p;
-    p=(unsigned char *)data;
-    
-    char hex_part[60];
-    char ascii_part[25];
-    output[0]='\0';
-    
-    size_t i;
-    size_t j;
-    
-    for(i=0;i<size;i=i+16)
-    {
-        hex_part[0]='\0';
-        ascii_part[0]='\0';
+    memset(trie, -1, sizeof(trie));
+    memset(fail, -1, sizeof(fail));
+    memset(threat_match, 0, sizeof(threat_match));
+    states_count = 1;
+}
 
-        for(j=0;j<16;j++)
+void add_threat_signature(const char* keyword, const char* threat_type)
+{
+    int curr = 0;
+    int i;
+    for (i = 0; keyword[i] != '\0'; i++)
+    {
+        unsigned char c = (unsigned char)keyword[i];
+        if (trie[curr][c] == -1)
         {
-            size_t currentIndex;
-            currentIndex=i+j;
-            
-            if(currentIndex<size)
+            trie[curr][c] = states_count++;
+        }
+        curr = trie[curr][c];
+    }
+    threat_match[curr] = strdup(threat_type);
+}
+
+void build_automaton()
+{
+    int queue[MAX_STATES];
+    int front = 0, rear = 0;
+    int c;
+    for (c = 0; c < ALPHABET_SIZE; c++)
+    {
+        if (trie[0][c] != -1)
+        {
+            fail[trie[0][c]] = 0;
+            queue[rear++] = trie[0][c];
+        }
+        else
+        {
+            trie[0][c] = 0;
+        }
+    }
+    while (front < rear)
+    {
+        int curr = queue[front++];
+        for (c = 0; c < ALPHABET_SIZE; c++)
+        {
+            if (trie[curr][c] != -1)
             {
-                unsigned char currentValue;
-                currentValue=p[currentIndex];
-                
-                char tempForHex[5];
-                sprintf(tempForHex,"%02X ",currentValue);
-                strcat(hex_part,tempForHex);
-                
-                int printableCheck;
-                printableCheck=isprint(currentValue);
-                
-                char tempForAscii[5];
-                if(printableCheck!=0)
-                {
-                    sprintf(tempForAscii,"%c",currentValue);
-                }
-                else
-                {
-                    sprintf(tempForAscii,".");
-                }
-                strcat(ascii_part,tempForAscii);
-            }
-            else
-            {
-                char emptySpace[5];
-                sprintf(emptySpace,"   ");
-                strcat(hex_part,emptySpace);
+                int f = fail[curr];
+                while (trie[f][c] == -1) f = fail[f];
+                fail[trie[curr][c]] = trie[f][c];
+                queue[rear++] = trie[curr][c];
             }
         }
-        
-        char fullLine[120];
-        sprintf(fullLine,"%s | %s\\n",hex_part,ascii_part);
-        strcat(output,fullLine);
-        
-        size_t currentOutputLength;
-        currentOutputLength=strlen(output);
-        
-        if(currentOutputLength>1500)
-            break;
     }
+}
+
+void scan_payload_for_threats(const unsigned char* payload, int payload_len, const char* src_ip)
+{
+    int curr = 0;
+    int i;
+    for (i = 0; i < payload_len; i++)
+    {
+        unsigned char c = payload[i];
+        while (trie[curr][c] == -1) curr = fail[curr];
+        curr = trie[curr][c];
+        
+        if (threat_match[curr] != NULL)
+        {
+            // GUI তে থ্রেট সিগনেচার অ্যালার্ট পাঠানো
+            printf("GUI_ALERT|SIGNATURE_MATCH|%s|%s\n", threat_match[curr], src_ip);
+            fflush(stdout);
+        }
+    }
+}
+
+void setup_threat_engine()
+{
+    init_aho_corasick();
+    add_threat_signature("USER root", "FTP_ROOT_LOGIN");
+    add_threat_signature("PASS ", "FTP_PASSWORD_LEAK");
+    add_threat_signature("eval(base64_decode", "PHP_MALWARE_INJECTION");
+    add_threat_signature("cmd.exe", "REVERSE_SHELL_ATTEMPT");
+    add_threat_signature("etc/passwd", "LOCAL_FILE_INCLUSION");
+    
+    build_automaton();
 }
 
 void packet_handler(u_char *args,const struct pcap_pkthdr *header,const u_char *packet)
@@ -144,10 +173,10 @@ void packet_handler(u_char *args,const struct pcap_pkthdr *header,const u_char *
     sprintf(src_ip,"%d.%d.%d.%d",ip->source[0],ip->source[1],ip->source[2],ip->source[3]);
     sprintf(dst_ip,"%d.%d.%d.%d",ip->destination[0],ip->destination[1],ip->destination[2],ip->destination[3]);
 
-    char proto_name[15];
+    char proto_name[25];
     strcpy(proto_name,"OTHER");
     
-    char info[250];
+    char info[500];
     strcpy(info,"Data Packet");
 
     if(currentProtocol==6)
@@ -219,13 +248,14 @@ void packet_handler(u_char *args,const struct pcap_pkthdr *header,const u_char *
         
         if(payload_len<0)
             payload_len=0;
-
-        if(src_port==80 || dst_port==80 || src_port==8080 || dst_port==8080)
-            strcpy(proto_name,"HTTP");
-        else if(src_port==443 || dst_port==443)
-            strcpy(proto_name,"HTTPS");
-        else
-            strcpy(proto_name,"TCP");
+            
+        // ⚠️ NEW: AHO-CORASICK TCP PAYLOAD SCAN 
+        if(payload_len>0)
+        {
+            unsigned char *payload_data;
+            payload_data=(unsigned char *)(tcp_raw+tcp_header_len);
+            scan_payload_for_threats(payload_data,payload_len,src_ip);
+        }
 
         char syn_tag[10];
         syn_tag[0]='\0';
@@ -236,7 +266,135 @@ void packet_handler(u_char *args,const struct pcap_pkthdr *header,const u_char *
         if(synFlagCheck!=0)
             strcpy(syn_tag,"[SYN] ");
 
-        sprintf(info,"%sPort: %d->%d Seq: %u Ack: %u Win: %u Len: %d",syn_tag,src_port,dst_port,seq,ack,win,payload_len);
+        if(src_port==80 || dst_port==80 || src_port==8080 || dst_port==8080)
+        {
+            strcpy(proto_name,"HTTP");
+            sprintf(info,"%sPort: %d->%d Seq: %u Ack: %u Win: %u Len: %d",syn_tag,src_port,dst_port,seq,ack,win,payload_len);
+        }
+        else if(src_port==443 || dst_port==443)
+        {
+            strcpy(proto_name,"HTTPS");
+            
+            int isSniFound;
+            isSniFound=0;
+            
+            char sni_name[256];
+            sni_name[0]='\0';
+
+            if(payload_len>=43)
+            {
+                unsigned char *tls_data;
+                tls_data=(unsigned char *)(tcp_raw+tcp_header_len);
+                
+                if(tls_data[0]==0x16) 
+                {
+                    if(tls_data[5]==0x01) 
+                    {
+                        int offset;
+                        offset=5;
+                        offset=offset+1; 
+                        offset=offset+3; 
+                        offset=offset+2; 
+                        offset=offset+32; 
+                        
+                        if(offset<payload_len)
+                        {
+                            int session_id_len;
+                            session_id_len=tls_data[offset];
+                            offset=offset+1+session_id_len;
+                        }
+                        
+                        if(offset+2<=payload_len)
+                        {
+                            int cipher_suites_len;
+                            cipher_suites_len=(tls_data[offset]<<8)|tls_data[offset+1];
+                            offset=offset+2+cipher_suites_len;
+                        }
+                        
+                        if(offset+1<=payload_len)
+                        {
+                            int comp_methods_len;
+                            comp_methods_len=tls_data[offset];
+                            offset=offset+1+comp_methods_len;
+                        }
+                        
+                        if(offset+2<=payload_len)
+                        {
+                            int extensions_len;
+                            extensions_len=(tls_data[offset]<<8)|tls_data[offset+1];
+                            offset=offset+2;
+                            
+                            int ext_end;
+                            ext_end=offset+extensions_len;
+                            
+                            if(ext_end>payload_len)
+                            {
+                                ext_end=payload_len;
+                            }
+                            
+                            while(offset+4<=ext_end)
+                            {
+                                int ext_type;
+                                ext_type=(tls_data[offset]<<8)|tls_data[offset+1];
+                                
+                                int ext_len;
+                                ext_len=(tls_data[offset+2]<<8)|tls_data[offset+3];
+                                
+                                offset=offset+4;
+                                
+                                if(ext_type==0) 
+                                {
+                                    if(offset+2<=ext_end)
+                                    {
+                                        int local_offset;
+                                        local_offset=offset+2;
+                                        
+                                        if(local_offset+3<=ext_end)
+                                        {
+                                            int name_type;
+                                            name_type=tls_data[local_offset];
+                                            
+                                            int name_len;
+                                            name_len=(tls_data[local_offset+1]<<8)|tls_data[local_offset+2];
+                                            
+                                            local_offset=local_offset+3;
+                                            
+                                            if(name_type==0 && local_offset+name_len<=ext_end)
+                                            {
+                                                if(name_len>255)
+                                                {
+                                                    name_len=255;
+                                                }
+                                                memcpy(sni_name,tls_data+local_offset,name_len);
+                                                sni_name[name_len]='\0';
+                                                isSniFound=1;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                offset=offset+ext_len;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if(isSniFound!=0)
+            {
+                strcpy(proto_name,"HTTPS (DPI)");
+                sprintf(info,"%s🌐 Domain Visited: %s",syn_tag,sni_name);
+            }
+            else
+            {
+                sprintf(info,"%sPort: %d->%d Seq: %u Ack: %u Win: %u Len: %d",syn_tag,src_port,dst_port,seq,ack,win,payload_len);
+            }
+        }
+        else
+        {
+            strcpy(proto_name,"TCP");
+            sprintf(info,"%sPort: %d->%d Seq: %u Ack: %u Win: %u Len: %d",syn_tag,src_port,dst_port,seq,ack,win,payload_len);
+        }
     }
     else if(currentProtocol==1)
     {
@@ -263,15 +421,68 @@ void packet_handler(u_char *args,const struct pcap_pkthdr *header,const u_char *
         int dst_port;
         dst_port=ntohs(udp->dest);
 
-        if(src_port==53 || dst_port==53)
-            strcpy(proto_name,"DNS");
-        else
-            strcpy(proto_name,"UDP");
+        int total_ip_len;
+        total_ip_len=ntohs(ip->length);
+        
+        int udp_payload_len;
+        udp_payload_len=total_ip_len-ipHeaderLengthInBytes-8;
 
-        sprintf(info,"Port: %d -> %d",src_port,dst_port);
+        if(src_port==53 || dst_port==53)
+        {
+            strcpy(proto_name,"DNS");
+            char queried_domain[256];
+            queried_domain[0]='\0';
+
+            if(udp_payload_len > 12)
+            {
+                unsigned char *dns_data = (unsigned char *)(packet + totalOffset + 8);
+                int qdcount = (dns_data[4] << 8) | dns_data[5]; 
+                
+                if(qdcount > 0)
+                {
+                    int offset = 12; 
+                    int j = 0;
+                    while(offset < udp_payload_len && dns_data[offset] != 0 && j < 250)
+                    {
+                        int len = dns_data[offset];
+                        if((len & 0xC0) == 0xC0) break; 
+                        offset++;
+                        for(int k=0; k<len && offset < udp_payload_len; k++)
+                        {
+                            queried_domain[j++] = dns_data[offset++];
+                        }
+                        queried_domain[j++] = '.';
+                    }
+                    if(j > 0) queried_domain[j-1] = '\0'; // শেষের ডট (.) রিমুভ
+                }
+            }
+
+            if(strlen(queried_domain) > 0) {
+                sprintf(info,"🌐 DNS Query: %s", queried_domain);
+            } else {
+                sprintf(info,"Port: %d -> %d", src_port, dst_port);
+            }
+        }
+        else if(src_port==443 || dst_port==443)
+        {
+            strcpy(proto_name,"QUIC/UDP");
+            sprintf(info,"Encrypted QUIC Traffic Port: %d -> %d", src_port, dst_port);
+        }
+        else
+        {
+            strcpy(proto_name,"UDP");
+            sprintf(info,"Port: %d -> %d", src_port, dst_port);
+        }
+
+        if(udp_payload_len>0)
+        {
+            unsigned char *udp_payload_data;
+            udp_payload_data=(unsigned char *)(packet+totalOffset+8);
+            scan_payload_for_threats(udp_payload_data,udp_payload_len,src_ip);
+        }
     }
 
-    char full_hex[2000];
+    char full_hex[10000]; 
     bpf_u_int32 capturedLength;
     capturedLength=header->caplen;
     
@@ -286,37 +497,67 @@ void packet_handler(u_char *args,const struct pcap_pkthdr *header,const u_char *
 
     printf("GUI_DATA|%d|%s.%03d|%s|%s|%s|%d|%s|%s|%s|%d|%s\n",total,timestr,msTime,src_ip,dst_ip,proto_name,packetLength,info,src_mac,dst_mac,packetTtl,full_hex);
     fflush(stdout);
+
+    check_syn_anomaly(packet); 
+ 
 }
 
-int Realtimepacket(char *target,int x)
+void Realtimepacket(int protocol_choice)
 {
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t *handle;
-    total=0;
     
-    int isLive;
-    isLive=strcmp(target,"live");
-
-    if(isLive==0)
-    {
-        handle=pcap_open_live("en0",BUFSIZ,1,100,errbuf);
-    }
-    else
-    {
-        handle=pcap_open_offline(target,errbuf);
-    }
-
+    setup_threat_engine();
+    
+    handle=pcap_open_live("en0",65536,1,1000,errbuf);
+    
     if(handle==NULL)
     {
-        printf("Error opening capture: %s\n",errbuf);
-        return -1;
+        handle=pcap_open_live("any",65536,1,1000,errbuf);
+        if(handle==NULL)
+        {
+            printf("Error opening device: %s\n",errbuf);
+            return;
+        }
     }
-
-    u_char *pointerToArg;
-    pointerToArg=(u_char *)&x;
     
-    pcap_loop(handle,0,packet_handler,pointerToArg);
+    pcap_loop(handle,0,packet_handler,(u_char*)&protocol_choice);
     pcap_close(handle);
+}
+
+void GetHexDumpGUI(const u_char *packet,bpf_u_int32 length,char *hexDump)
+{
+    hexDump[0]='\0';
+    char tempBuf[50];
     
-    return 0;
+    bpf_u_int32 limit;
+    limit=length;
+    
+    if(limit>2000)
+    {
+        limit=2000; 
+    }
+    
+    bpf_u_int32 i;
+    bpf_u_int32 j;
+    
+    for(i=0;i<limit;i=i+16)
+    {
+        sprintf(tempBuf,"%04X:  ",i);
+        strcat(hexDump,tempBuf);
+        
+        for(j=0;j<16;j++)
+        {
+            if(i+j<limit)
+            {
+                sprintf(tempBuf,"%02X ",packet[i+j]);
+                strcat(hexDump,tempBuf);
+            }
+            else
+            {
+                strcat(hexDump,"   "); 
+            }
+        }
+        strcat(hexDump,"\\n"); 
+    }
 }
