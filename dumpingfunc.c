@@ -4,7 +4,6 @@
 #include<stdlib.h>
 #include<ctype.h>
 #include"icmpRead.h"
-#include"hexdump.h"
 #include"arpRead.h"
 #include"SynFlood.h"
 #include"Realtimepacket.h"
@@ -21,7 +20,6 @@ void pipeline()
     int i;
     int packetlen;
     
-    // Global Header reading (First 24 bytes of a PCAP file)
     for(i=0;i<24;i++)
     {
         value=getchar();
@@ -36,10 +34,8 @@ void pipeline()
     }
     data[i]='\0';
     
-    // Record loop (Reading packet by packet)
     while(1)
     {
-        // Record Header reading (16 bytes before every packet)
         for(i=0;i<16;i++)
         {
             value=getchar();
@@ -54,12 +50,10 @@ void pipeline()
         }
         data[i]='\0';
         
-        // Getting packet length from the 8th byte of the record header
         unsigned char lengthByte;
         lengthByte=data[8];
         packetlen=lengthByte;
         
-        // Packet data reading (Actual captured data)
         for(i=0;i<packetlen;i++)
         {
             value=getchar();
@@ -97,7 +91,6 @@ void commandLine(char *pcapfile[100])
     int i;
     int packetlen;
     
-    // Global Header reading from file
     for(i=0;i<24;i++)
     {
         value=fgetc(fp);
@@ -114,7 +107,6 @@ void commandLine(char *pcapfile[100])
     
     while(1)
     {
-        // Pcap Record Header from file
         for(i=0;i<16;i++)
         {
             value=fgetc(fp);
