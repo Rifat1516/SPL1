@@ -1,5 +1,9 @@
-#include<sys/types.h>
-int SynFlood (char *pcapfile);
-int is_same(int address1[], u_int32_t address2[]);;
-void check_flood();
-void checking_syn(int address[], int s_a);
+#ifndef SYNFLOOD_H
+#define SYNFLOOD_H
+
+#include<pcap.h>
+
+void check_syn_anomaly(const u_char *packet);
+void SynFlood(char *targetIP);
+
+#endif
